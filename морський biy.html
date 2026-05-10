@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Морський Бій: Професійний Редактор</title>
+    <style>
+        :root { --cell-size: 32px; --primary: #2980b9; --ship-color: #7f8c8d; }
+        @media (max-width: 450px) { :root { --cell-size: 28px; } }
+
+        body { font-family: 'Segoe UI', sans-serif; background: #fdfdfd; display: flex; flex-direction: column; align-items: center; padding: 10px; margin: 0; }
+        .grid { display: grid; grid-template-columns: repeat(10, var(--cell-size)); border: 2px solid #2c3e50; background: white; }
+        .cell { width: var(--cell-size); height: var(--cell-size); border: 1px solid #e1e1e1; box-sizing: border-box; cursor: pointer; transition: 0.2s; position: relative; }
+        
+        /* Стан клітинок */
+        .ship { background: var(--ship-color) !important; border-color: #34495e; }
+        .preview { background: rgba(52, 152, 219, 0.4) !important; } /* Колір при наведенні */
+        .invalid { background: rgba(231, 76, 60, 0.4) !important; } /* Колір якщо не можна ставити */
+        .hit { background: #e74c3c !important; animation: pop 0.3s; }
+        .miss { background: #ecf0f1; }
+        .miss::after { content: ""; width: 6px; height: 6px; background: #bdc3c7; border-radius: 50%; position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); }
+        .sunk { outline: 2px solid #f1c40f; z-index: 10; }
+
+        .ship-menu { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; margin: 15px 0; max-width: 400px; }
+        .ship-btn { padding: 8px 12px; border: 2px solid #bdc3c7; border-radius: 5px; background: white; cursor: pointer; font-size: 0.9em; transition: 0.3s; }
+        .ship-btn.active { border-color: var(--primary); background: #ebf5fb; font-weight: bold; }
+        .ship-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+        .controls { display: flex; gap: 10px; margin-bottom: 20px; }
+        .btn { padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; font-weight: bold; color: white; transition: 0.3s; }
+        .btn-blue { background: var(--primary); }
+        .btn-red { background: #e74c3c; }
+        .btn-green { background: #27ae60; }
+        
+        .status-bar { margin: 10px; font-weight: bold; color: #34495e; min-height: 1.5em; }
+        @keyframes pop { 0% { transform: scale(1.2); } 100% { transform: scale(1); } }
+    </style>
+</head>
+<body>
+
+    <h2 style="margin: 10px 0;">Морський Бій</h2>
+    <div style="background: #27ae60; color: white; padding: 4px 15px; border-radius: 20px; margin-bottom: 10px;">
+        Перемог: <span id="win-count">0</span>
+    </div>
+
+    <div style="display:flex; flex-wrap:wrap; gap:20px; justify-content:center;">
+        <div>
+            <p style="text-align:center; font-size: 0.9em; margin: 5px;">Ваше поле</p>
+            <div id="player-grid" class="grid"></div>
+        </div>
+        <div id="bot-side" style="display:none;">
+            <p style="text-align:center; font-size: 0.9em; margin: 5px;">Поле бота</p>
+            <div id="bot-grid" class="grid"></div>
+        </div>
+    </div>
+
+    <div class="status-bar" id="status">Оберіть корабель та напрямок</div>
+
+    <div id="setup-ui">
+        <div class="ship-menu" id="ship-menu"></div>
+        <div class="controls">
+            <button class="btn btn-blue" id="rotate-btn">Напрямок: →</button>
+            <button class="btn btn-red" id="reset-btn">Очистити поле</button>
+        </div>
+        <button class="btn btn-green" id="start-btn" style="width: 100%; display: none;">У БІЙ!</button>
+    </div>
+
+    <script>
+        const SIZE = 10;
+        const INITIAL_SHIPS = [
+            { id: 0, size: 4, name: "Лінкор", count: 1 },
+            { id: 1, size: 3, name: "Крейсер", count: 2 },
+            { id: 2, size: 2, name: "Есмінець", count: 3 },
+            { id: 3, size: 1, name: "Катер", count: 4 }
+        ];
+
+        let playerBoard = [], botBoard = [];
+        let playerShipsCoords = [], botShipsCoords = [];
+        let wins = localStorage.getItem('seaBattleWins_v5') || 0;
+        let isVertical = false;
+        let selectedShipType = null;
+        let gameStarted = false;
+        let shipsState = JSON.parse(JSON.stringify(INITIAL_SHIPS));
+
+        document.getElementById('win-count').innerText = wins;
+
+        function initBoards() {
+            const pGrid = document.getElementById('player-grid');
+            pGrid.innerHTML = '';
+            playerBoard = [];
+            for (let i = 0; i < 100; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                cell.onmouseover = () => drawPreview(i, true);
+                cell.onmouseout = () => drawPreview(i, false);
+                cell.onclick = () => placeShip(i);
+                pGrid.appendChild(cell);
+                playerBoard.push({ hasShip: false, isHit: false, el: cell });
+            }
+        }
+
+        function renderShipButtons() {
+            const menu = document.getElementById('ship-menu');
+            menu.innerHTML = '';
+            let totalLeft = 0;
+            shipsState.forEach(ship => {
+                totalLeft += ship.count;
+                const btn = document.createElement('button');
+                btn.className = `ship-btn ${selectedShipType?.id === ship.id ? 'active' : ''}`;
+                btn.innerText = `${ship.name} (${ship.size}к) x${ship.count}`;
+                btn.disabled = ship.count === 0;
+                btn.onclick = () => {
+                    selectedShipType = ship;
+                    renderShipButtons();
+                };
+                menu.appendChild(btn);
+            });
+            document.getElementById('start-btn').style.display = totalLeft === 0 ? 'block' : 'none';
+        }
+
+        function getCoords(startIdx, size, vert) {
+            const r = Math.floor(startIdx / 10), c = startIdx % 10;
+            const res = [];
+            for (let i = 0; i < size; i++) {
+                const nr = vert ? r + i : r, nc = vert ? c : c + i;
+                if (nr >= 10 || nc >= 10) return null;
+                res.push(nr * 10 + nc);
+            }
+            return res;
+        }
+
+        function checkCollision(board, coords) {
+            return coords.every(idx => {
+                const r = Math.floor(idx / 10), c = idx % 10;
+                for (let dr = -1; dr <= 1; dr++) {
+                    for (let dc = -1; dc <= 1; dc++) {
+                        const nr = r + dr, nc = c + dc;
+                        if (nr >= 0 && nr < 10 && nc >= 0 && nc < 10 && board[nr * 10 + nc].hasShip) return false;
+                    }
+                }
+                return true;
+            });
+        }
+
+        function drawPreview(idx, show) {
+            if (!selectedShipType || gameStarted) return;
+            const coords = getCoords(idx, selectedShipType.size, isVertical);
+            const isValid = coords && checkCollision(playerBoard, coords);
+            
+            playerBoard.forEach(c => c.el.classList.remove('preview', 'invalid'));
+            if (show && coords) {
+                coords.forEach(i => playerBoard[i].el.classList.add(isValid ? 'preview' : 'invalid'));
+            }
+        }
+
+        function placeShip(idx) {
+            if (!selectedShipType || gameStarted) return;
+            const coords = getCoords(idx, selectedShipType.size, isVertical);
+            if (coords && checkCollision(playerBoard, coords)) {
+                coords.forEach(i => {
+                    playerBoard[i].hasShip = true;
+                    playerBoard[i].el.classList.add('ship');
+                    playerBoard[i].shipId = playerShipsCoords.length;
+                });
+                playerShipsCoords.push(coords);
+                shipsState.find(s => s.id === selectedShipType.id).count--;
+                if (shipsState.find(s => s.id === selectedShipType.id).count === 0) selectedShipType = null;
+                renderShipButtons();
+            }
+        }
+
+        document.getElementById('rotate-btn').onclick = function() {
+            isVertical = !isVertical;
+            this.innerText = `Напрямок: ${isVertical ? '↓' : '→'}`;
+        };
+
+        document.getElementById('reset-btn').onclick = () => {
+            shipsState = JSON.parse(JSON.stringify(INITIAL_SHIPS));
+            selectedShipType = null;
+            playerShipsCoords = [];
+            initBoards();
+            renderShipButtons();
+        };
+
+        // Логіка гри (спрощена для HTML відповіді)
+        document.getElementById('start-btn').onclick = () => {
+            gameStarted = true;
+            document.getElementById('setup-ui').style.display = 'none';
+            document.getElementById('bot-side').style.display = 'block';
+            document.getElementById('status').innerText = "Бій почався! Ваш хід.";
+            setupBot();
+        };
+
+        function setupBot() {
+            const bGrid = document.getElementById('bot-grid');
+            botBoard = [];
+            for (let i = 0; i < 100; i++) {
+                const cell = document.createElement('div');
+                cell.className = 'cell';
+                cell.onclick = () => playerAttack(i);
+                bGrid.appendChild(cell);
+                botBoard.push({ hasShip: false, isHit: false, el: cell });
+            }
+            [4, 3, 3, 2, 2, 2, 1, 1, 1, 1].forEach((size, sId) => {
+                let placed = false;
+                while(!placed) {
+                    let idx = Math.floor(Math.random()*100), v = Math.random()<0.5;
+                    let coords = getCoords(idx, size, v);
+                    if(coords && checkCollision(botBoard, coords)) {
+                        coords.forEach(i => {
+                            botBoard[i].hasShip = true;
+                            botBoard[i].shipId = sId;
+                        });
+                        botShipsCoords[sId] = coords;
+                        placed = true;
+                    }
+                }
+            });
+        }
+
+        async function playerAttack(idx) {
+            if (!gameStarted || botBoard[idx].isHit) return;
+            botBoard[idx].isHit = true;
+            if (botBoard[idx].hasShip) {
+                botBoard[idx].el.classList.add('hit');
+                checkSunk(botBoard, botShipsCoords, botBoard[idx].shipId);
+                if (botBoard.filter(c => c.hasShip).every(c => c.isHit)) {
+                    alert("Перемога!"); wins++; 
+                    localStorage.setItem('seaBattleWins_v5', wins); 
+                    location.reload();
+                }
+            } else {
+                botBoard[idx].el.classList.add('miss');
+                gameStarted = false;
+                setTimeout(botTurn, 1000);
+            }
+        }
+
+        let botMemory = [];
+        async function botTurn() {
+            let idx;
+            if(botMemory.length > 0) idx = botMemory.shift();
+            else do { idx = Math.floor(Math.random()*100); } while(playerBoard[idx].isHit);
+
+            playerBoard[idx].isHit = true;
+            if(playerBoard[idx].hasShip) {
+                playerBoard[idx].el.classList.add('hit');
+                checkSunk(playerBoard, playerShipsCoords, playerBoard[idx].shipId);
+                const r = Math.floor(idx/10), c = idx%10;
+                [{r:r-1,c}, {r:r+1,c}, {r,c:c-1}, {r,c:c+1}].forEach(n => {
+                    if(n.r>=0 && n.r<10 && n.c>=0 && n.c<10) {
+                        let ni = n.r*10+n.c;
+                        if(!playerBoard[ni].isHit) botMemory.push(ni);
+                    }
+                });
+                if(playerBoard.filter(c => c.hasShip).every(c => c.isHit)) { alert("Ви програли!"); location.reload(); }
+                else setTimeout(botTurn, 1000);
+            } else {
+                playerBoard[idx].el.classList.add('miss');
+                gameStarted = true;
+                document.getElementById('status').innerText = "Ваш хід!";
+            }
+        }
+
+        function checkSunk(board, coordsArray, id) {
+            const ship = coordsArray[id];
+            if(ship.every(i => board[i].isHit)) {
+                ship.forEach(i => board[i].el.classList.add('sunk'));
+            }
+        }
+
+        initBoards();
+        renderShipButtons();
+    </script>
+</body>
+</html>
